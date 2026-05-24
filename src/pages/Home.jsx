@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import {
@@ -9,37 +9,15 @@ import { Button } from '../components/ui/Button';
 import Ai from '../assets/image.png';
 import video1 from '../assets/video1.mp4';
 import video2 from '../assets/video2.mp4';
-import blobVideo from '../assets/blob.webm';
+import { HeroModelFrame } from '../components/3d/HeroModelFrame';
 
 export const Home = () => {
+  void motion;
+
   const tickerItems = [
     "GyanSarathi: Trusted by Capital Markets Globally",
     "Serving Institutional Clients Across the USA and Europe and the Middle East and Australia"
   ];
-
-  // ── Animation Variants ────────────────────────────────────────────────────
-  const floatAnim = {
-    animate: {
-      y: [0, -10, 0],
-      scale: [1, 1.02, 1],
-      transition: {
-        duration: 4,
-        repeat: Infinity,
-        ease: "easeInOut"
-      }
-    }
-  };
-
-  const bounceAnim = {
-    animate: {
-      y: [0, -15, 0],
-      transition: {
-        duration: 2.5,
-        repeat: Infinity,
-        ease: "easeInOut"
-      }
-    }
-  };
 
   return (
     <div className="w-full overflow-hidden">
@@ -65,20 +43,9 @@ export const Home = () => {
         {/* CENTERED AREA: BLOB & FLOATING TAGS */}
         <div className="relative w-full flex-1 flex flex-col items-center justify-center pt-12 md:pt-20">
 
-          {/* ── HERO: BLOB VIDEO ── */}
+          {/* ── HERO: 3D SCENE ── */}
           <div className="relative z-20 w-full h-[440px] md:h-[620px]" style={{ overflow: 'visible', isolation: 'isolate' }}>
-            <video 
-              src={blobVideo} 
-              autoPlay 
-              loop 
-              muted 
-              playsInline
-              className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-              style={{ 
-                mixBlendMode: 'screen',
-                filter: 'brightness(1.1) contrast(1.1)'
-              }}
-            />
+            <HeroModelFrame />
           </div>
 
           {/* BOTTOM LEFT: DESCRIPTION & PILL BUTTONS */}
@@ -402,7 +369,7 @@ export const Home = () => {
           <div className="max-w-7xl mx-auto text-center mb-24 cursor-default">
             <h4 className="text-3xl md:text-[4.5rem] font-medium tracking-tight text-black leading-[1.1] flex flex-wrap items-center justify-center gap-y-4 md:gap-y-6">
               <span className="relative z-20">Multi-Industry Analytics</span>
-              <span className="relative z-10 -mx-6 md:-mx-12 w-32 h-16 md:w-60 md:h-30 rounded-full overflow-hidden inline-flex items-center justify-center bg-gray-100 border border-black/5 scale-110 shadow-lg -translate-x-10 md:-translate-x-16">
+              <span className="relative z-10 -mx-6 md:-mx-12 w-32 h-16 md:w-70 md:h-40 rounded-full overflow-hidden inline-flex items-center justify-center bg-gray-100 border border-black/5 scale-110 shadow-lg -translate-x-10 md:-translate-x-16">
                 <video src={video2} autoPlay loop muted className="w-full h-full object-cover  hover:opacity-100 transition-opacity duration-700" alt="video is loading..." />
               </span>
 

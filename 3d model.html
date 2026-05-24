@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>AI Core</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: transparent; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: default; }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="stage"></canvas>
+
+<script type="module">
+import * as THREE from "three";
+import { EffectComposer }  from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass }      from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { ShaderPass }      from "three/addons/postprocessing/ShaderPass.js";
+import { FXAAShader }      from "three/addons/shaders/FXAAShader.js";
+
+// ─── Baked-in settings (from final Tweaks values) ─────────────────
+const BLOOM_STRENGTH  = 0.0;
+const DISPLACEMENT    = 0.0;
+const NOISE_FREQ      = 0.5;
+const ROTATION_SPEED  = 1.8;
+const PARTICLE_SIZE   = 0.1;
+const PARTICLE_COUNT  = 14000;
+
+// ─── Renderer ─────────────────────────────────────────────────────
+const canvas = document.getElementById("stage");
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: true,
+  alpha: true,
+  powerPreference: "high-performance",
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x000000, 0);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+
+const scene = new THREE.Scene();
+scene.background = null;
+
+const camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 0, 7.4);
+
+const coreGroup = new THREE.Group();
+scene.add(coreGroup);
+
+// ─── simplex noise (shader include) ───────────────────────────────
+const SIMPLEX_GLSL = /* glsl */`
+vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
+vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
+vec4 permute(vec4 x){return mod289(((x*34.0)+1.0)*x);}
+vec4 taylorInvSqrt(vec4 r){return 1.79284291400159-0.85373472095314*r;}
+float snoise(vec3 v){
+  const vec2  C = vec2(1.0/6.0, 1.0/3.0);
+  const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+  vec3 i  = floor(v + dot(v, C.yyy));
+  vec3 x0 = v - i + dot(i, C.xxx);
+  vec3 g = step(x0.yzx, x0.xyz);
+  vec3 l = 1.0 - g;
+  vec3 i1 = min(g.xyz, l.zxy);
+  vec3 i2 = max(g.xyz, l.zxy);
+  vec3 x1 = x0 - i1 + C.xxx;
+  vec3 x2 = x0 - i2 + C.yyy;
+  vec3 x3 = x0 - D.yyy;
+  i = mod289(i);
+  vec4 p = permute(permute(permute(
+            i.z + vec4(0.0, i1.z, i2.z, 1.0))
+          + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+          + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+  float n_ = 0.142857142857;
+  vec3 ns = n_ * D.wyz - D.xzx;
+  vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+  vec4 x_ = floor(j * ns.z);
+  vec4 y_ = floor(j - 7.0 * x_);
+  vec4 x = x_ *ns.x + ns.yyyy;
+  vec4 y = y_ *ns.x + ns.yyyy;
+  vec4 h = 1.0 - abs(x) - abs(y);
+  vec4 b0 = vec4( x.xy, y.xy );
+  vec4 b1 = vec4( x.zw, y.zw );
+  vec4 s0 = floor(b0)*2.0 + 1.0;
+  vec4 s1 = floor(b1)*2.0 + 1.0;
+  vec4 sh = -step(h, vec4(0.0));
+  vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+  vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+  vec3 p0 = vec3(a0.xy,h.x);
+  vec3 p1 = vec3(a0.zw,h.y);
+  vec3 p2 = vec3(a1.xy,h.z);
+  vec3 p3 = vec3(a1.zw,h.w);
+  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+  p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+  vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+  m = m * m;
+  return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+}
+`;
+
+// ─── Inner displacement sphere ────────────────────────────────────
+const coreUniforms = {
+  uTime:   { value: 0 },
+  uAmp:    { value: DISPLACEMENT },
+  uFreq:   { value: NOISE_FREQ },
+  uColorA: { value: new THREE.Color("#52BBDC") },
+  uColorB: { value: new THREE.Color("#52BBDC") },
+  uPulse:  { value: 0 },
+};
+const coreMat = new THREE.ShaderMaterial({
+  uniforms: coreUniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: SIMPLEX_GLSL + /* glsl */`
+    uniform float uTime;
+    uniform float uAmp;
+    uniform float uFreq;
+    uniform float uPulse;
+    varying vec3  vNormal;
+    varying vec3  vViewPos;
+    varying float vDisp;
+    void main(){
+      vec3 pos = position;
+      float n  = snoise(pos * uFreq + vec3(uTime * 0.35));
+      float n2 = snoise(pos * (uFreq * 2.2) - vec3(uTime * 0.6)) * 0.5;
+      float disp = (n + n2) * (uAmp + uPulse * 0.35);
+      pos += normal * disp;
+      vDisp   = disp;
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      vViewPos = mv.xyz;
+      vNormal  = normalize(normalMatrix * normal);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform vec3  uColorA;
+    uniform vec3  uColorB;
+    uniform float uTime;
+    uniform float uPulse;
+    varying vec3  vNormal;
+    varying vec3  vViewPos;
+    varying float vDisp;
+    void main(){
+      vec3 V = normalize(-vViewPos);
+      float fres = pow(1.0 - max(dot(vNormal, V), 0.0), 2.4);
+      float bands = sin(vViewPos.y * 9.0 - uTime * 2.0) * 0.5 + 0.5;
+      bands = smoothstep(0.6, 0.98, bands) * 0.5;
+      vec3 col = mix(uColorA, uColorB, fres);
+      col += uColorB * (vDisp * 1.8 + bands * 0.6);
+      col += uColorB * uPulse * 0.4;
+      float alpha = 0.32 + fres * 0.95 + uPulse * 0.15;
+      gl_FragColor = vec4(col, alpha);
+    }
+  `,
+});
+const coreMesh = new THREE.Mesh(new THREE.IcosahedronGeometry(1.0, 64), coreMat);
+coreGroup.add(coreMesh);
+
+// dark heart + bright nucleus
+coreGroup.add(new THREE.Mesh(
+  new THREE.SphereGeometry(0.72, 32, 32),
+  new THREE.MeshBasicMaterial({ color: 0x52BBDC, transparent: true, opacity: 0, depthWrite: false })
+));
+const nucleusMat = new THREE.MeshBasicMaterial({
+  color: new THREE.Color("#52BBDC"),
+  transparent: true, opacity: 1,
+  blending: THREE.AdditiveBlending, depthWrite: false,
+});
+const nucleusMesh = new THREE.Mesh(new THREE.SphereGeometry(0.16, 24, 24), nucleusMat);
+coreGroup.add(nucleusMesh);
+
+// ─── Wireframe shells ─────────────────────────────────────────────
+function makeWire(radius, detail, opacity){
+  return new THREE.Mesh(
+    new THREE.IcosahedronGeometry(radius, detail),
+    new THREE.MeshBasicMaterial({
+      color: 0x52BBDC,
+      wireframe: true,
+      transparent: true,
+      opacity,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  );
+}
+const wireA = makeWire(1.55, 2, 0.55);
+const wireB = makeWire(1.85, 1, 0.28);
+const wireC = makeWire(1.15, 3, 0.18);
+coreGroup.add(wireA, wireB, wireC);
+
+// ─── Orbital rings ────────────────────────────────────────────────
+function makeRing(radius, tube, segments=128){
+  return new THREE.Mesh(
+    new THREE.TorusGeometry(radius, tube, 8, segments),
+    new THREE.MeshBasicMaterial({
+      color: 0x52BBDC,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  );
+}
+const ring1 = makeRing(2.15, 0.006);
+ring1.rotation.set(Math.PI * 0.42, 0, 0.3);
+const ring2 = makeRing(2.45, 0.004);
+ring2.rotation.set(-Math.PI * 0.32, 0.7, 0);
+const ring3 = makeRing(2.05, 0.003, 96);
+ring3.rotation.set(Math.PI * 0.18, -0.4, 0);
+coreGroup.add(ring1, ring2, ring3);
+
+// ─── Satellites ───────────────────────────────────────────────────
+const satellites = [];
+for (let i = 0; i < 8; i++){
+  const s = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.08, 0),
+    new THREE.MeshBasicMaterial({
+      color: 0x52BBDC, transparent: true, opacity: 1,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    })
+  );
+  s.userData = {
+    radius: 2.0 + Math.random() * 0.7,
+    speed:  0.2 + Math.random() * 0.5,
+    phase:  Math.random() * Math.PI * 2,
+    tilt:   (Math.random() - 0.5) * Math.PI,
+    yaw:    Math.random() * Math.PI,
+  };
+  satellites.push(s);
+  coreGroup.add(s);
+}
+
+// ─── Particle cloud ───────────────────────────────────────────────
+const origins = new Float32Array(PARTICLE_COUNT * 3);
+const rands   = new Float32Array(PARTICLE_COUNT);
+for (let i = 0; i < PARTICLE_COUNT; i++){
+  const r = 1.9 + Math.pow(Math.random(), 0.55) * 8.0;
+  const u = Math.random() * 2 - 1;
+  const t = Math.random() * Math.PI * 2;
+  const s = Math.sqrt(1 - u * u);
+  origins[i*3]     = Math.cos(t) * s * r;
+  origins[i*3 + 1] = u * r;
+  origins[i*3 + 2] = Math.sin(t) * s * r;
+  rands[i] = Math.random();
+}
+const partGeo = new THREE.BufferGeometry();
+partGeo.setAttribute("position", new THREE.BufferAttribute(origins, 3));
+partGeo.setAttribute("aOrig",    new THREE.BufferAttribute(origins.slice(), 3));
+partGeo.setAttribute("aRand",    new THREE.BufferAttribute(rands, 1));
+
+const partUniforms = {
+  uTime:      { value: 0 },
+  uMouse:     { value: new THREE.Vector3(0, 0, 5) },
+  uInfluence: { value: 0 },
+  uPulse:     { value: 0 },
+  uColor:     { value: new THREE.Color("#52BBDC") },
+  uSize:      { value: PARTICLE_SIZE },
+  uPxRatio:   { value: renderer.getPixelRatio() },
+};
+const partMat = new THREE.ShaderMaterial({
+  uniforms: partUniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: /* glsl */`
+    attribute vec3  aOrig;
+    attribute float aRand;
+    uniform float uTime;
+    uniform vec3  uMouse;
+    uniform float uInfluence;
+    uniform float uPulse;
+    uniform float uSize;
+    uniform float uPxRatio;
+    varying float vAlpha;
+    varying float vInfl;
+    void main(){
+      vec3 pos = aOrig;
+      float t = uTime * (0.18 + aRand * 0.35);
+      vec3 wob = vec3(
+        sin(t + aRand * 6.28),
+        cos(t * 0.9 + aRand * 3.14),
+        sin(t * 1.3 + aRand * 1.7)
+      ) * 0.045;
+      pos += wob;
+
+      float r = length(aOrig.xz);
+      float ang = uTime * (0.08 + 0.05 / max(r, 0.3)) * (aRand > 0.5 ? 1.0 : -1.0);
+      float c = cos(ang), s = sin(ang);
+      pos.xz = mat2(c, -s, s, c) * pos.xz;
+
+      vec3 toMouse = uMouse - pos;
+      float d = length(toMouse);
+      float infl = uInfluence * exp(-d * d * 0.45);
+      pos += normalize(toMouse + 1e-5) * infl * 0.8;
+
+      pos += normalize(aOrig) * uPulse * (0.4 + aRand * 0.6);
+
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      float baseSize = uSize * (0.5 + aRand * 1.4);
+      gl_PointSize = baseSize * uPxRatio * (1.0 + infl * 2.5 + uPulse * 0.8)
+                   * (260.0 / max(-mv.z, 0.1));
+      gl_PointSize = min(gl_PointSize, 6.0 * uPxRatio);
+      gl_Position  = projectionMatrix * mv;
+      vAlpha = 0.35 + aRand * 0.55 + infl * 1.0 + uPulse * 0.3;
+      vInfl  = infl;
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform vec3 uColor;
+    varying float vAlpha;
+    varying float vInfl;
+    void main(){
+      vec2 c = gl_PointCoord - 0.5;
+      float d = length(c);
+      if (d > 0.5) discard;
+      float core = smoothstep(0.45, 0.0, d);
+      float halo = smoothstep(0.5, 0.32, d) * 0.18;
+      float bright = mix(1.0, 1.4, vInfl);
+      gl_FragColor = vec4(uColor * bright, (core + halo) * vAlpha);
+    }
+  `,
+});
+const particles = new THREE.Points(partGeo, partMat);
+coreGroup.add(particles);
+
+// ─── Post-processing ──────────────────────────────────────────────
+const composer = new EffectComposer(renderer);
+composer.setPixelRatio(renderer.getPixelRatio());
+composer.setSize(window.innerWidth, window.innerHeight);
+composer.addPass(new RenderPass(scene, camera));
+
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  BLOOM_STRENGTH, 0.7, 0.12
+);
+composer.addPass(bloomPass);
+
+const fxaaPass = new ShaderPass(FXAAShader);
+function syncFxaa(){
+  const px = renderer.getPixelRatio();
+  fxaaPass.material.uniforms["resolution"].value.set(
+    1 / (window.innerWidth * px),
+    1 / (window.innerHeight * px)
+  );
+}
+syncFxaa();
+composer.addPass(fxaaPass);
+
+// ─── Mouse / interaction ──────────────────────────────────────────
+let pulse = 0;
+let pulseDecay = 0;
+
+function triggerPulse(s = 1){ pulse = s; pulseDecay = s; }
+
+window.addEventListener("resize", () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  partUniforms.uPxRatio.value = renderer.getPixelRatio();
+  syncFxaa();
+});
+
+// ─── Animation loop ───────────────────────────────────────────────
+const clock = new THREE.Clock();
+
+function tick(){
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t  = clock.getElapsedTime();
+
+  coreGroup.rotation.y = t * 0.16;
+  coreGroup.rotation.x = Math.sin(t * 0.22) * 0.12;
+
+  const spin = dt * ROTATION_SPEED;
+  coreMesh.rotation.y += spin * 0.18;
+  coreMesh.rotation.x += spin * 0.06;
+  wireA.rotation.y    -= spin * 0.25;
+  wireA.rotation.x    += spin * 0.12;
+  wireB.rotation.y    += spin * 0.10;
+  wireB.rotation.z    += spin * 0.06;
+  wireC.rotation.x    -= spin * 0.40;
+  wireC.rotation.y    += spin * 0.30;
+  ring1.rotation.z    += spin * 0.45;
+  ring2.rotation.z    -= spin * 0.30;
+  ring3.rotation.y    += spin * 0.55;
+  nucleusMesh.rotation.y += spin * 0.6;
+
+  for (const s of satellites){
+    const u = s.userData;
+    u.phase += dt * u.speed;
+    const x = Math.cos(u.phase) * u.radius;
+    const z = Math.sin(u.phase) * u.radius;
+    const y = Math.sin(u.phase * 0.7) * 0.4;
+    s.position.set(x, y, z);
+    s.position.applyAxisAngle(new THREE.Vector3(1,0,0), u.tilt * 0.6);
+    s.position.applyAxisAngle(new THREE.Vector3(0,0,1), u.yaw * 0.2);
+    s.rotation.y += dt * 1.4;
+    s.rotation.x += dt * 0.8;
+  }
+
+  partUniforms.uInfluence.value = 0;
+
+  const breath = 1.0 + Math.sin(t * 1.2) * 0.02 + pulse * 0.08;
+  coreGroup.scale.setScalar(breath);
+
+  pulseDecay *= Math.pow(0.001, dt);
+  if (pulseDecay < 0.001) pulseDecay = 0;
+  pulse = pulseDecay;
+  coreUniforms.uPulse.value = pulse;
+  partUniforms.uPulse.value = pulse;
+
+  coreUniforms.uTime.value = t;
+  partUniforms.uTime.value = t;
+  partUniforms.uMouse.value.set(0, 0, 5);
+
+  composer.render();
+  requestAnimationFrame(tick);
+}
+
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

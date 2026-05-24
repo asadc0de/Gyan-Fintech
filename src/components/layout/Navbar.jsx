@@ -43,7 +43,7 @@ export const Navbar = () => {
             <div className="flex items-center gap-8">
               <Link to="/" className="group flex items-center ml-2">
                 <img
-                  src="/logo.png"
+                  src="/logo.svg"
                   alt="GyanSarathi"
                   className="h-10 md:h-12 w-auto object-contain transition-opacity duration-300 group-hover:opacity-80"
                 />
